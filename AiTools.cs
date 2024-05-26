@@ -5,6 +5,7 @@ using System.Net.Http.Headers;
 using System.Text.Json;
 using System.Text;
 using System.Threading.Tasks;
+using System.Text.Json.Serialization;
 
 namespace OpenAiTools
 {
@@ -30,15 +31,15 @@ namespace OpenAiTools
         Task<List<string>> GetMultipleChatResponses(string prompt, int count);
 
         // Get Image Responses in various formats
-        Task<ImageResponse> GetImageResponse(string prompt, int count = 1);
-        Task<string> GetImageUrl(string prompt, int width, int height);
-        Task<string> GetImageUrl(string prompt, int width, int height, List<string> urls);
-        Task<byte[]> DownloadImage(string prompt, int width, int height);
-        Task<byte[]> DownloadImage(string prompt, int width, int height, List<string> urls);
-        Task<List<string>> GetImageUrls(string prompt, int width, int height, int count);
-        Task<List<string>> GetImageUrls(string prompt, int width, int height, List<string> urls, int count);
-        Task<List<byte[]>> DownloadImages(string prompt, int width, int height, int count);
-        Task<List<byte[]>> DownloadImages(string prompt, int width, int height, List<string> urls, int count);
+        Task<ImageResponse> GetImageResponse(string prompt, int count = 1, bool improvePrompt = true, int width = 1024, int height = 1024);
+        Task<string> GetImageUrl(string prompt, int width, int height, bool improvePrompt = true);
+        Task<string> GetImageUrl(string prompt, int width, int height, List<string> urls, bool improvePrompt = true);
+        Task<byte[]> DownloadImage(string prompt, int width, int height, bool improvePrompt = true);
+        Task<byte[]> DownloadImage(string prompt, int width, int height, List<string> urls, bool improvePrompt = true);
+        Task<List<string>> GetImageUrls(string prompt, int width, int height, int count, bool improvePrompt = true);
+        Task<List<string>> GetImageUrls(string prompt, int width, int height, List<string> urls, int count, bool improvePrompt = true);
+        Task<List<byte[]>> DownloadImages(string prompt, int width, int height, int count, bool improvePrompt = true);
+        Task<List<byte[]>> DownloadImages(string prompt, int width, int height, List<string> urls, int count, bool improvePrompt = true);
 
         // Perform Image Analysis
         Task<List<string>> AnalyzeImage(string url);
@@ -49,7 +50,7 @@ namespace OpenAiTools
         Task<string> CheckApiHealth();
     }
 
-    public class OpenAiTools : IOpenAiTools
+    public class AiTools : IOpenAiTools
     {
         private string _apiKey = string.Empty;
         private string _chatModel = "gpt-4-2024-05-13";
@@ -61,9 +62,21 @@ namespace OpenAiTools
         private int _defaultImageWidth = 1024;
         private int _defaultImageHeight = 1024;
 
-        public OpenAiTools(IHttpClientFactory clientFactory)
+        public AiTools(IHttpClientFactory clientFactory)
         {
             _clientFactory = clientFactory;
+        }
+        public AiTools(IHttpClientFactory clientFactory, OpenAiSettings openAiSettings)
+        {
+            _clientFactory = clientFactory;
+            _apiKey = openAiSettings.ApiKey;
+            _chatModel = openAiSettings.ChatModel;
+            _imageModel = openAiSettings.ImageModel;
+            _imageEndpoint = openAiSettings.ImageEndpoint;
+            _chatEndpoint = openAiSettings.ChatEndpoint;
+            _defaultMaxTokens = openAiSettings.DefaultMaxTokens;
+            _defaultImageWidth = openAiSettings.DefaultImageWidth;
+            _defaultImageHeight = openAiSettings.DefaultImageHeight;
         }
 
         // Setting methods
@@ -114,7 +127,7 @@ namespace OpenAiTools
 
             if (response.IsSuccessStatusCode)
             {
-                var responseObject = JsonSerializer.Deserialize<ChatResponse>(responseData);
+                ChatResponse responseObject = JsonSerializer.Deserialize<ChatResponse>(responseData);
                 if (responseObject != null)
                 {
                     responseObject.IsSuccess = true;
@@ -329,11 +342,23 @@ namespace OpenAiTools
             return responses;
         }
 
-        // Get Image Response
-        public async Task<ImageResponse> GetImageResponse(string prompt, int count = 1)
+        // Improve Image Prompt
+        private async Task<string> ImproveImagePrompt(string prompt)
         {
+            var improvedPrompt = await GetChatResponseString($"Improve this image generation prompt: {prompt}. This is for Dall.e 3. this should be less than 4000 Characters. Please use as close to 4000 characters as possible. This will not be read by a human.");
+            return improvedPrompt;
+        }
+
+        // Get Image Response
+        public async Task<ImageResponse> GetImageResponse(string prompt, int count = 1, bool improvePrompt = true, int width = 1024, int height = 1024)
+        {
+            if (improvePrompt)
+            {
+                prompt = await ImproveImagePrompt(prompt);
+            }
+
             var client = SetClient();
-            var request = GenerateImageRequestContent(prompt, count: count);
+            var request = GenerateImageRequestContent(prompt, count: count, width: width, height: height);
 
             try
             {
@@ -387,8 +412,7 @@ namespace OpenAiTools
             {
                 { "model", _imageModel },
                 { "prompt", prompt },
-                { "width", width },
-                { "height", height },
+                { "size", width + "x" + height },
                 { "n", count }
             };
 
@@ -402,14 +426,19 @@ namespace OpenAiTools
         }
 
         // Get Image URL
-        public async Task<string> GetImageUrl(string prompt, int width, int height)
+        public async Task<string> GetImageUrl(string prompt, int width, int height, bool improvePrompt = true)
         {
-            var response = await GetImageResponse(prompt);
+            var response = await GetImageResponse(prompt, 1, improvePrompt, width, height);
             return response.IsSuccess && response.Data.Count > 0 ? response.Data[0].Url : null;
         }
 
-        public async Task<string> GetImageUrl(string prompt, int width, int height, List<string> urls)
+        public async Task<string> GetImageUrl(string prompt, int width, int height, List<string> urls, bool improvePrompt = true)
         {
+            if (improvePrompt)
+            {
+                prompt = await ImproveImagePrompt(prompt);
+            }
+
             var requestContent = GenerateImageRequestContent(prompt, urls, width, height);
 
             var client = SetClient();
@@ -428,27 +457,32 @@ namespace OpenAiTools
         }
 
         // Download Image
-        public async Task<byte[]> DownloadImage(string prompt, int width, int height)
+        public async Task<byte[]> DownloadImage(string prompt, int width, int height, bool improvePrompt = true)
         {
-            var imageUrl = await GetImageUrl(prompt, width, height);
+            var imageUrl = await GetImageUrl(prompt, width, height, improvePrompt);
             return await DownloadImageFromUrl(imageUrl);
         }
 
-        public async Task<byte[]> DownloadImage(string prompt, int width, int height, List<string> urls)
+        public async Task<byte[]> DownloadImage(string prompt, int width, int height, List<string> urls, bool improvePrompt = true)
         {
-            var imageUrl = await GetImageUrl(prompt, width, height, urls);
+            var imageUrl = await GetImageUrl(prompt, width, height, urls, improvePrompt);
             return await DownloadImageFromUrl(imageUrl);
         }
 
         // Multiple Image URL methods
-        public async Task<List<string>> GetImageUrls(string prompt, int width, int height, int count)
+        public async Task<List<string>> GetImageUrls(string prompt, int width, int height, int count, bool improvePrompt = true)
         {
-            var response = await GetImageResponse(prompt, count);
+            var response = await GetImageResponse(prompt, count, improvePrompt, width, height);
             return response.IsSuccess ? response.Data.ConvertAll(data => data.Url) : new List<string>();
         }
 
-        public async Task<List<string>> GetImageUrls(string prompt, int width, int height, List<string> urls, int count)
+        public async Task<List<string>> GetImageUrls(string prompt, int width, int height, List<string> urls, int count, bool improvePrompt = true)
         {
+            if (improvePrompt)
+            {
+                prompt = await ImproveImagePrompt(prompt);
+            }
+
             var requestContent = GenerateImageRequestContent(prompt, urls, width, height, count);
 
             var client = SetClient();
@@ -474,9 +508,9 @@ namespace OpenAiTools
         }
 
         // Download Images
-        public async Task<List<byte[]>> DownloadImages(string prompt, int width, int height, int count)
+        public async Task<List<byte[]>> DownloadImages(string prompt, int width, int height, int count, bool improvePrompt = true)
         {
-            var imageUrls = await GetImageUrls(prompt, width, height, count);
+            var imageUrls = await GetImageUrls(prompt, width, height, count, improvePrompt);
             var images = new List<byte[]>();
             foreach (var url in imageUrls)
             {
@@ -485,9 +519,9 @@ namespace OpenAiTools
             return images;
         }
 
-        public async Task<List<byte[]>> DownloadImages(string prompt, int width, int height, List<string> urls, int count)
+        public async Task<List<byte[]>> DownloadImages(string prompt, int width, int height, List<string> urls, int count, bool improvePrompt = true)
         {
-            var imageUrlsList = await GetImageUrls(prompt, width, height, urls, count);
+            var imageUrlsList = await GetImageUrls(prompt, width, height, urls, count, improvePrompt);
             var images = new List<byte[]>();
             foreach (var url in imageUrlsList)
             {
@@ -615,31 +649,109 @@ namespace OpenAiTools
 
     public class ChatResponse : Response
     {
+        [JsonPropertyName("id")]
+        public string Id { get; set; }
+
+        [JsonPropertyName("object")]
+        public string Object { get; set; }
+
+        [JsonPropertyName("created")]
+        public long Created { get; set; }
+
+        [JsonPropertyName("model")]
+        public string Model { get; set; }
+
+        [JsonPropertyName("choices")]
         public List<Choice> Choices { get; set; }
+
+        [JsonPropertyName("usage")]
+        public Usage Usage { get; set; }
+
+        [JsonPropertyName("system_fingerprint")]
+        public string SystemFingerprint { get; set; }
     }
 
     public class Choice
     {
+        [JsonPropertyName("index")]
+        public int Index { get; set; }
+
+        [JsonPropertyName("message")]
         public Message Message { get; set; }
+
+        [JsonPropertyName("logprobs")]
+        public object Logprobs { get; set; }
+
+        [JsonPropertyName("finish_reason")]
+        public string FinishReason { get; set; }
     }
 
     public class Message
     {
+        [JsonPropertyName("role")]
+        public string Role { get; set; }
+
+        [JsonPropertyName("content")]
         public string Content { get; set; }
+    }
+
+    public class Usage
+    {
+        [JsonPropertyName("prompt_tokens")]
+        public int PromptTokens { get; set; }
+
+        [JsonPropertyName("completion_tokens")]
+        public int CompletionTokens { get; set; }
+
+        [JsonPropertyName("total_tokens")]
+        public int TotalTokens { get; set; }
     }
 
     public class ImageResponse : Response
     {
+        [JsonPropertyName("data")]
         public List<ImageData> Data { get; set; }
     }
 
     public class ImageData
     {
+        [JsonPropertyName("url")]
         public string Url { get; set; }
+
+        [JsonPropertyName("revised_prompt")]
+        public string RevisedPrompt { get; set; }
     }
 
     public class AnalyzeImageResponse
     {
+        [JsonPropertyName("analyze_results")]
         public List<string> AnalyzeResults { get; set; }
+    }
+
+    public class OpenAiSettings
+    {
+        [JsonPropertyName("api_key")]
+        public string ApiKey { get; set; }
+
+        [JsonPropertyName("chat_model")]
+        public string ChatModel { get; set; }
+
+        [JsonPropertyName("image_model")]
+        public string ImageModel { get; set; }
+
+        [JsonPropertyName("chat_endpoint")]
+        public string ChatEndpoint { get; set; }
+
+        [JsonPropertyName("image_endpoint")]
+        public string ImageEndpoint { get; set; }
+
+        [JsonPropertyName("default_max_tokens")]
+        public int DefaultMaxTokens { get; set; }
+
+        [JsonPropertyName("default_image_width")]
+        public int DefaultImageWidth { get; set; }
+
+        [JsonPropertyName("default_image_height")]
+        public int DefaultImageHeight { get; set; }
     }
 }
