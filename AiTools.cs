@@ -154,6 +154,10 @@ namespace OpenAiTools
 
         private StringContent GenerateChatRequestContent(string prompt, List<string> urls = null, string role = "You are a helpful AI", bool JSON = false, int maxTokens = 300)
         {
+            if(_defaultMaxTokens>maxTokens)
+            {
+                maxTokens = _defaultMaxTokens;
+            }
             var messages = new List<Dictionary<string, object>>
             {
                 new Dictionary<string, object>
