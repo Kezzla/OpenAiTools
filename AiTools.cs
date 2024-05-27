@@ -6,6 +6,7 @@ using System.Text.Json;
 using System.Text;
 using System.Threading.Tasks;
 using System.Text.Json.Serialization;
+using System.IO;
 
 namespace OpenAiTools
 {
@@ -19,6 +20,7 @@ namespace OpenAiTools
         void SetApiKey(string apiKey);
         void SetDefaultMaxTokens(int maxTokens);
         void SetDefaultImageDimensions(int width, int height);
+        void SetVoice(string voice);
 
         // Get Chat Responses in various formats
         Task<ChatResponse> GetChatResponse(string prompt);
@@ -48,6 +50,10 @@ namespace OpenAiTools
 
         // Check API Health
         Task<string> CheckApiHealth();
+
+        // Text to Speech
+        Task<byte[]> TextToSpeech(string text);
+        Task StreamAudioToFile(string text, string filePath);
     }
 
     public class AiTools : IOpenAiTools
@@ -57,15 +63,18 @@ namespace OpenAiTools
         private string _imageModel = "dall-e-3";
         private string _imageEndpoint = "https://api.openai.com/v1/images/generations";
         private string _chatEndpoint = "https://api.openai.com/v1/chat/completions";
+        private string _ttsEndpoint = "https://api.openai.com/v1/audio/speech";
         private readonly IHttpClientFactory _clientFactory;
         private int _defaultMaxTokens = 300;
         private int _defaultImageWidth = 1024;
         private int _defaultImageHeight = 1024;
+        private string _voice = "alloy";
 
         public AiTools(IHttpClientFactory clientFactory)
         {
             _clientFactory = clientFactory;
         }
+
         public AiTools(IHttpClientFactory clientFactory, OpenAiSettings openAiSettings)
         {
             _clientFactory = clientFactory;
@@ -74,9 +83,11 @@ namespace OpenAiTools
             _imageModel = openAiSettings.ImageModel;
             _imageEndpoint = openAiSettings.ImageEndpoint;
             _chatEndpoint = openAiSettings.ChatEndpoint;
+            _ttsEndpoint = openAiSettings.TtsEndpoint;
             _defaultMaxTokens = openAiSettings.DefaultMaxTokens;
             _defaultImageWidth = openAiSettings.DefaultImageWidth;
             _defaultImageHeight = openAiSettings.DefaultImageHeight;
+            _voice = "alloy";
         }
 
         // Setting methods
@@ -91,6 +102,7 @@ namespace OpenAiTools
             _defaultImageWidth = width;
             _defaultImageHeight = height;
         }
+        public void SetVoice(string voice) => _voice = voice;
 
         private HttpClient SetClient(string bearer = "Bearer", string mediaTypeWithQualityHeaderValue = "application/json")
         {
@@ -154,7 +166,7 @@ namespace OpenAiTools
 
         private StringContent GenerateChatRequestContent(string prompt, List<string> urls = null, string role = "You are a helpful AI", bool JSON = false, int maxTokens = 300)
         {
-            if(_defaultMaxTokens>maxTokens)
+            if (_defaultMaxTokens > maxTokens)
             {
                 maxTokens = _defaultMaxTokens;
             }
@@ -643,6 +655,59 @@ namespace OpenAiTools
                 return $"Unhandled Error: {ex.Message}";
             }
         }
+
+        // Text to Speech
+        public async Task<byte[]> TextToSpeech(string text)
+        {
+            var client = SetClient();
+            var requestContent = GenerateTextToSpeechRequestContent(text);
+
+            try
+            {
+                var response = await client.PostAsync(_ttsEndpoint, requestContent);
+                response.EnsureSuccessStatusCode();
+                return await response.Content.ReadAsByteArrayAsync();
+            }
+            catch (Exception ex)
+            {
+                throw new Exception($"Unhandled Error: {ex.Message}");
+            }
+        }
+
+        public async Task StreamAudioToFile(string text, string filePath)
+        {
+            var client = SetClient();
+            var requestContent = GenerateTextToSpeechRequestContent(text);
+
+            try
+            {
+                var response = await client.PostAsync(_ttsEndpoint, requestContent);
+                response.EnsureSuccessStatusCode();
+
+                using (var responseStream = await response.Content.ReadAsStreamAsync())
+                using (var fileStream = new FileStream(filePath, FileMode.Create, FileAccess.Write, FileShare.None, 4096, true))
+                {
+                    await responseStream.CopyToAsync(fileStream);
+                }
+            }
+            catch (Exception ex)
+            {
+                throw new Exception($"Unhandled Error: {ex.Message}");
+            }
+        }
+
+        private StringContent GenerateTextToSpeechRequestContent(string text)
+        {
+            var requestContent = new Dictionary<string, object>
+            {
+                { "model", "tts-1" },
+                { "input", text },
+                { "voice", _voice }
+            };
+
+            var json = JsonSerializer.Serialize(requestContent, new JsonSerializerOptions { DefaultIgnoreCondition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull });
+            return new StringContent(json, Encoding.UTF8, "application/json");
+        }
     }
 
     public class Response
@@ -757,5 +822,8 @@ namespace OpenAiTools
 
         [JsonPropertyName("default_image_height")]
         public int DefaultImageHeight { get; set; }
+
+        [JsonPropertyName("tts_endpoint")]
+        public string TtsEndpoint { get; set; }
     }
 }
