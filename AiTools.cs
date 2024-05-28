@@ -315,6 +315,7 @@ namespace OpenAiTools
         // Get Image Response
         public async Task<ImageResponse> GetImageResponse(string prompt, int count = 1, bool improvePrompt = true, int width = 1024, int height = 1024)
         {
+            if(improvePrompt)prompt =await GetChatResponseString("Please generate an improved image prompt for Dall.e 3 from this information:"+prompt);
             var requestContent = GenerateImageRequestContent(prompt, count, width, height, improvePrompt);
             var client = SetClient();
             var response = await client.PostAsync(_imageEndpoint, requestContent);
@@ -324,6 +325,7 @@ namespace OpenAiTools
             if (response.IsSuccessStatusCode)
             {
                 var responseObject = JsonSerializer.Deserialize<ImageResponse>(responseData);
+                responseObject.IsSuccess = true;
                 return responseObject;
             }
             else
@@ -346,22 +348,19 @@ namespace OpenAiTools
             {
                 height = _defaultImageHeight;
             }
+
             var requestContent = new Dictionary<string, object>
-            {
-                { "prompt", prompt },
-                { "n", count },
-                { "size", $"{width}x{height}" },
-                { "model", _imageModel },
-                { "response_format", new { type = "json" } }
-            };
-            if (improvePrompt)
-            {
-                requestContent["response_format"] = new { type = "json_object" };
-            }
+    {
+        { "prompt", prompt },
+        { "n", count },
+        { "size", $"{width}x{height}" },
+        { "model", _imageModel }
+    };
 
             var json = JsonSerializer.Serialize(requestContent);
             return new StringContent(json, Encoding.UTF8, "application/json");
         }
+
 
         public async Task<string> GetImageUrl(string prompt, int width, int height, bool improvePrompt = true)
         {
