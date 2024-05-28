@@ -1,12 +1,16 @@
 ﻿using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Net.Http;
 using System.Net.Http.Headers;
-using System.Text.Json;
 using System.Text;
-using System.Threading.Tasks;
+using System.Text.Json;
 using System.Text.Json.Serialization;
+using System.Threading.Tasks;
+using Azure.Storage.Blobs;
 using System.IO;
+using Azure.Storage.Blobs.Models;
+using System.Text.RegularExpressions;
 
 namespace OpenAiTools
 {
@@ -53,7 +57,8 @@ namespace OpenAiTools
 
         // Text to Speech
         Task<byte[]> TextToSpeech(string text);
-        Task StreamAudioToFile(string text, string filePath);
+        Task StreamAudioToFile(string text, string filePath, string voice);
+        Task<string> StreamAudioToBlob(string text, string containerName, string fileName, string voice);
     }
 
     public class AiTools : IOpenAiTools
@@ -65,19 +70,22 @@ namespace OpenAiTools
         private string _chatEndpoint = "https://api.openai.com/v1/chat/completions";
         private string _ttsEndpoint = "https://api.openai.com/v1/audio/speech";
         private readonly IHttpClientFactory _clientFactory;
+        private readonly BlobServiceClient _blobServiceClient;
         private int _defaultMaxTokens = 300;
         private int _defaultImageWidth = 1024;
         private int _defaultImageHeight = 1024;
         private string _voice = "alloy";
 
-        public AiTools(IHttpClientFactory clientFactory)
+        public AiTools(IHttpClientFactory clientFactory, BlobServiceClient blobServiceClient)
         {
             _clientFactory = clientFactory;
+            _blobServiceClient = blobServiceClient;
         }
 
-        public AiTools(IHttpClientFactory clientFactory, OpenAiSettings openAiSettings)
+        public AiTools(IHttpClientFactory clientFactory, OpenAiSettings openAiSettings, BlobServiceClient blobServiceClient)
         {
             _clientFactory = clientFactory;
+            _blobServiceClient = blobServiceClient;
             _apiKey = openAiSettings.ApiKey;
             _chatModel = openAiSettings.ChatModel;
             _imageModel = openAiSettings.ImageModel;
@@ -209,7 +217,7 @@ namespace OpenAiTools
                 requestContent["response_format"] = new { type = "json_object" };
             }
 
-            var json = JsonSerializer.Serialize(requestContent, new JsonSerializerOptions { DefaultIgnoreCondition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull });
+            var json = JsonSerializer.Serialize(requestContent, new JsonSerializerOptions { DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull });
             return new StringContent(json, Encoding.UTF8, "application/json");
         }
 
@@ -234,85 +242,43 @@ namespace OpenAiTools
             }
         }
 
-        // Get Chat Response String with choice
+        public async Task<List<string>> GetMultipleChatResponses(string prompt, int count)
+        {
+            var responses = new List<string>();
+            for (int i = 0; i < count; i++)
+            {
+                var response = await GetChatResponse(prompt);
+                if (response.IsSuccess)
+                {
+                    responses.Add(response.Choices[0].Message.Content);
+                }
+            }
+            return responses;
+        }
+
         public async Task<string> GetChatResponseString(string prompt, int choice = 0)
         {
-            var chatResponse = await GetChatResponse(prompt);
-
-            if (chatResponse.IsSuccess)
-            {
-                if (chatResponse.Choices != null && chatResponse.Choices.Count > 0)
-                {
-                    return chatResponse.Choices[choice].Message.Content;
-                }
-                else
-                {
-                    return "No valid response from the API.";
-                }
-            }
-            else
-            {
-                throw new Exception($"Error: {chatResponse.ErrorMessage}");
-            }
+            var response = await GetChatResponse(prompt);
+            return response.IsSuccess ? response.Choices[choice].Message.Content : response.ErrorMessage;
         }
 
-        // Get Chat Response String without choice
-        public async Task<string> GetChatResponseString(string prompt)
-        {
-            var chatResponse = await GetChatResponse(prompt);
-
-            if (chatResponse.IsSuccess)
-            {
-                if (chatResponse.Choices != null && chatResponse.Choices.Count > 0)
-                {
-                    return chatResponse.Choices[0].Message.Content;
-                }
-                else
-                {
-                    return "No valid response from the API.";
-                }
-            }
-            else
-            {
-                throw new Exception($"Error: {chatResponse.ErrorMessage}");
-            }
-        }
-
-        // Get Chat Response String with image URLs
         public async Task<string> GetChatResponseString(string prompt, List<string> imageUrls)
         {
-            var requestContent = GenerateChatRequestContent(prompt, urls: imageUrls);
-
-            var client = SetClient();
-            var response = await client.PostAsync(_chatEndpoint, requestContent);
-
-            var responseData = await response.Content.ReadAsStringAsync();
-
-            if (response.IsSuccessStatusCode)
-            {
-                var responseObject = JsonSerializer.Deserialize<ChatResponse>(responseData);
-                if (responseObject != null && responseObject.Choices != null && responseObject.Choices.Count > 0)
-                {
-                    return responseObject.Choices[0].Message.Content;
-                }
-                else
-                {
-                    return "No valid response from the API.";
-                }
-            }
-            else
-            {
-                throw new Exception($"Error: {responseData}");
-            }
+            var response = await GetChatResponse(prompt);
+            return response.IsSuccess ? response.Choices[0].Message.Content : response.ErrorMessage;
         }
 
-        // Get Chat Response Structured
+        public async Task<string> GetChatResponseString(string prompt)
+        {
+            var response = await GetChatResponse(prompt);
+            return response.IsSuccess ? response.Choices[0].Message.Content : response.ErrorMessage;
+        }
+
         public async Task<ChatResponse> GetChatResponseStructured(string prompt)
         {
             return await GetChatResponse(prompt);
         }
 
-        // Continue Chat Conversation
         public async Task<ChatResponse> ContinueChatConversation(List<Dictionary<string, string>> messages)
         {
             var client = SetClient();
@@ -342,75 +308,23 @@ namespace OpenAiTools
                 { "max_tokens", _defaultMaxTokens }
             };
 
-            var json = JsonSerializer.Serialize(requestContent, new JsonSerializerOptions { DefaultIgnoreCondition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull });
+            var json = JsonSerializer.Serialize(requestContent, new JsonSerializerOptions { DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull });
             return new StringContent(json, Encoding.UTF8, "application/json");
-        }
-
-        // Get Multiple Chat Responses
-        public async Task<List<string>> GetMultipleChatResponses(string prompt, int count)
-        {
-            var responses = new List<string>();
-            for (int i = 0; i < count; i++)
-            {
-                var response = await GetChatResponseString(prompt);
-                responses.Add(response);
-            }
-            return responses;
-        }
-
-        // Improve Image Prompt
-        private async Task<string> ImproveImagePrompt(string prompt)
-        {
-            var improvedPrompt = await GetChatResponseString($"Improve this image generation prompt: {prompt}. This is for Dall.e 3. this should be less than 4000 Characters. Please use as close to 4000 characters as possible. This will not be read by a human.");
-            return improvedPrompt;
         }
 
         // Get Image Response
         public async Task<ImageResponse> GetImageResponse(string prompt, int count = 1, bool improvePrompt = true, int width = 1024, int height = 1024)
         {
-            if (improvePrompt)
-            {
-                prompt = await ImproveImagePrompt(prompt);
-            }
-
+            var requestContent = GenerateImageRequestContent(prompt, count, width, height, improvePrompt);
             var client = SetClient();
-            var request = GenerateImageRequestContent(prompt, count: count, width: width, height: height);
+            var response = await client.PostAsync(_imageEndpoint, requestContent);
 
-            try
-            {
-                var response = await client.PostAsync(_imageEndpoint, request);
-                return await ExportToImageResponse(response);
-            }
-            catch (Exception ex)
-            {
-                return new ImageResponse
-                {
-                    IsSuccess = false,
-                    ErrorMessage = $"Unhandled Error: {ex.Message}"
-                };
-            }
-        }
-
-        private async Task<ImageResponse> ExportToImageResponse(HttpResponseMessage response)
-        {
             var responseData = await response.Content.ReadAsStringAsync();
 
             if (response.IsSuccessStatusCode)
             {
                 var responseObject = JsonSerializer.Deserialize<ImageResponse>(responseData);
-                if (responseObject != null)
-                {
-                    responseObject.IsSuccess = true;
-                    return responseObject;
-                }
-                else
-                {
-                    return new ImageResponse
-                    {
-                        IsSuccess = false,
-                        ErrorMessage = "Failed to deserialize response."
-                    };
-                }
+                return responseObject;
             }
             else
             {
@@ -422,221 +336,155 @@ namespace OpenAiTools
             }
         }
 
-        private StringContent GenerateImageRequestContent(string prompt, List<string> urls = null, int width = 1024, int height = 1024, int count = 1)
+        private StringContent GenerateImageRequestContent(string prompt, int count = 1, int width = 1024, int height = 1024, bool improvePrompt = true)
         {
+            if (_defaultImageWidth > width)
+            {
+                width = _defaultImageWidth;
+            }
+            if (_defaultImageHeight > height)
+            {
+                height = _defaultImageHeight;
+            }
             var requestContent = new Dictionary<string, object>
             {
-                { "model", _imageModel },
                 { "prompt", prompt },
-                { "size", width + "x" + height },
-                { "n", count }
+                { "n", count },
+                { "size", $"{width}x{height}" },
+                { "model", _imageModel },
+                { "response_format", new { type = "json" } }
             };
-
-            if (urls != null)
+            if (improvePrompt)
             {
-                requestContent["image_urls"] = urls;
+                requestContent["response_format"] = new { type = "json_object" };
             }
 
-            var json = JsonSerializer.Serialize(requestContent, new JsonSerializerOptions { DefaultIgnoreCondition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull });
+            var json = JsonSerializer.Serialize(requestContent);
             return new StringContent(json, Encoding.UTF8, "application/json");
         }
 
-        // Get Image URL
         public async Task<string> GetImageUrl(string prompt, int width, int height, bool improvePrompt = true)
         {
             var response = await GetImageResponse(prompt, 1, improvePrompt, width, height);
-            return response.IsSuccess && response.Data.Count > 0 ? response.Data[0].Url : null;
+            return response.IsSuccess ? response.Data[0].Url : "Error";
         }
 
         public async Task<string> GetImageUrl(string prompt, int width, int height, List<string> urls, bool improvePrompt = true)
         {
-            if (improvePrompt)
-            {
-                prompt = await ImproveImagePrompt(prompt);
-            }
-
-            var requestContent = GenerateImageRequestContent(prompt, urls, width, height);
-
-            var client = SetClient();
-            var response = await client.PostAsync(_imageEndpoint, requestContent);
-
-            var imageResponse = await ExportToImageResponse(response);
-
-            if (imageResponse.Data != null && imageResponse.Data.Count > 0)
-            {
-                return imageResponse.Data[0].Url;
-            }
-            else
-            {
-                throw new Exception("No valid response from the API.");
-            }
+            var response = await GetImageResponse(prompt, 1, improvePrompt, width, height);
+            return response.IsSuccess ? response.Data[0].Url : "Error";
         }
 
-        // Download Image
         public async Task<byte[]> DownloadImage(string prompt, int width, int height, bool improvePrompt = true)
         {
-            var imageUrl = await GetImageUrl(prompt, width, height, improvePrompt);
-            return await DownloadImageFromUrl(imageUrl);
+            var url = await GetImageUrl(prompt, width, height, improvePrompt);
+            if (url == "Error")
+            {
+                return new byte[0];
+            }
+
+            var client = _clientFactory.CreateClient();
+            return await client.GetByteArrayAsync(url);
         }
 
         public async Task<byte[]> DownloadImage(string prompt, int width, int height, List<string> urls, bool improvePrompt = true)
         {
-            var imageUrl = await GetImageUrl(prompt, width, height, urls, improvePrompt);
-            return await DownloadImageFromUrl(imageUrl);
+            var url = await GetImageUrl(prompt, width, height, urls, improvePrompt);
+            if (url == "Error")
+            {
+                return new byte[0];
+            }
+
+            var client = _clientFactory.CreateClient();
+            return await client.GetByteArrayAsync(url);
         }
 
-        // Multiple Image URL methods
         public async Task<List<string>> GetImageUrls(string prompt, int width, int height, int count, bool improvePrompt = true)
         {
             var response = await GetImageResponse(prompt, count, improvePrompt, width, height);
-            return response.IsSuccess ? response.Data.ConvertAll(data => data.Url) : new List<string>();
+            return response.IsSuccess ? response.Data.Select(x => x.Url).ToList() : new List<string> { "Error" };
         }
 
         public async Task<List<string>> GetImageUrls(string prompt, int width, int height, List<string> urls, int count, bool improvePrompt = true)
         {
-            if (improvePrompt)
-            {
-                prompt = await ImproveImagePrompt(prompt);
-            }
-
-            var requestContent = GenerateImageRequestContent(prompt, urls, width, height, count);
-
-            var client = SetClient();
-            var response = await client.PostAsync(_imageEndpoint, requestContent);
-
-            var imageResponse = await ExportToImageResponse(response);
-
-            if (imageResponse.Data != null && imageResponse.Data.Count > 0)
-            {
-                var urlsList = new List<string>();
-
-                foreach (var data in imageResponse.Data)
-                {
-                    urlsList.Add(data.Url);
-                }
-
-                return urlsList;
-            }
-            else
-            {
-                throw new Exception("No valid response from the API.");
-            }
+            var response = await GetImageResponse(prompt, count, improvePrompt, width, height);
+            return response.IsSuccess ? response.Data.Select(x => x.Url).ToList() : new List<string> { "Error" };
         }
 
-        // Download Images
         public async Task<List<byte[]>> DownloadImages(string prompt, int width, int height, int count, bool improvePrompt = true)
         {
-            var imageUrls = await GetImageUrls(prompt, width, height, count, improvePrompt);
-            var images = new List<byte[]>();
-            foreach (var url in imageUrls)
-            {
-                images.Add(await DownloadImageFromUrl(url));
-            }
-            return images;
+            var urls = await GetImageUrls(prompt, width, height, count, improvePrompt);
+            var tasks = urls.Select(async url => await DownloadImageFromUrl(url)).ToList();
+            return await Task.WhenAll(tasks).ContinueWith(t => t.Result.ToList());
         }
 
         public async Task<List<byte[]>> DownloadImages(string prompt, int width, int height, List<string> urls, int count, bool improvePrompt = true)
         {
-            var imageUrlsList = await GetImageUrls(prompt, width, height, urls, count, improvePrompt);
-            var images = new List<byte[]>();
-            foreach (var url in imageUrlsList)
-            {
-                images.Add(await DownloadImageFromUrl(url));
-            }
-            return images;
+            var urlList = await GetImageUrls(prompt, width, height, urls, count, improvePrompt);
+            var tasks = urlList.Select(async url => await DownloadImageFromUrl(url)).ToList();
+            return await Task.WhenAll(tasks).ContinueWith(t => t.Result.ToList());
         }
 
-        // Download Image Helper
         private async Task<byte[]> DownloadImageFromUrl(string url)
         {
+            if (url == "Error")
+            {
+                return new byte[0];
+            }
+
             var client = _clientFactory.CreateClient();
-            var response = await client.GetAsync(url);
-            response.EnsureSuccessStatusCode();
-            return await response.Content.ReadAsByteArrayAsync();
+            return await client.GetByteArrayAsync(url);
         }
 
-        // Perform Image Analysis
+        // Analyze Image
         public async Task<List<string>> AnalyzeImage(string url)
         {
             var client = SetClient();
-            var requestContent = GenerateImageAnalysisRequestContent(url);
+            var response = await client.PostAsync($"{_imageEndpoint}/analyze", new StringContent(JsonSerializer.Serialize(new { image_url = url }), Encoding.UTF8, "application/json"));
+            var responseData = await response.Content.ReadAsStringAsync();
 
-            try
+            if (response.IsSuccessStatusCode)
             {
-                var response = await client.PostAsync(_imageEndpoint, requestContent);
-                return await ExportToImageAnalysisResponse(response);
+                var responseObject = JsonSerializer.Deserialize<ImageAnalysisResponse>(responseData);
+                return responseObject.Labels.Select(x => x.Name).ToList();
             }
-            catch (Exception ex)
+            else
             {
-                return new List<string> { $"Unhandled Error: {ex.Message}" };
+                throw new Exception($"Error: {responseData}");
             }
         }
 
         public async Task<List<string>> AnalyzeImage(string url, string request)
         {
             var client = SetClient();
-            var requestContent = GenerateImageAnalysisRequestContent(url, request);
-
-            try
-            {
-                var response = await client.PostAsync(_imageEndpoint, requestContent);
-                return await ExportToImageAnalysisResponse(response);
-            }
-            catch (Exception ex)
-            {
-                return new List<string> { $"Unhandled Error: {ex.Message}" };
-            }
-        }
-
-        private async Task<List<string>> ExportToImageAnalysisResponse(HttpResponseMessage response)
-        {
+            var response = await client.PostAsync($"{_imageEndpoint}/analyze", new StringContent(request, Encoding.UTF8, "application/json"));
             var responseData = await response.Content.ReadAsStringAsync();
 
             if (response.IsSuccessStatusCode)
             {
-                var responseObject = JsonSerializer.Deserialize<List<string>>(responseData);
-                return responseObject ?? new List<string> { "Failed to deserialize response." };
+                var responseObject = JsonSerializer.Deserialize<ImageAnalysisResponse>(responseData);
+                return responseObject.Labels.Select(x => x.Name).ToList();
             }
             else
             {
-                return new List<string> { responseData };
+                throw new Exception($"Error: {responseData}");
             }
         }
 
-        private StringContent GenerateImageAnalysisRequestContent(string url, string request = null)
-        {
-            var requestContent = new Dictionary<string, object>
-            {
-                { "model", _imageModel },
-                { "url", url }
-            };
-
-            if (request != null)
-            {
-                requestContent["request"] = request;
-            }
-
-            var json = JsonSerializer.Serialize(requestContent, new JsonSerializerOptions { DefaultIgnoreCondition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull });
-            return new StringContent(json, Encoding.UTF8, "application/json");
-        }
-
-        // Analyze Local Image
         public async Task<List<string>> AnalyzeLocalImage(byte[] imageBytes)
         {
             var client = SetClient();
-            var content = new MultipartFormDataContent();
-            var imageContent = new ByteArrayContent(imageBytes);
-            imageContent.Headers.ContentType = MediaTypeHeaderValue.Parse("image/jpeg");
-            content.Add(imageContent, "file", "image.jpg");
+            var response = await client.PostAsync($"{_imageEndpoint}/analyze", new ByteArrayContent(imageBytes));
+            var responseData = await response.Content.ReadAsStringAsync();
 
-            try
+            if (response.IsSuccessStatusCode)
             {
-                var response = await client.PostAsync(_imageEndpoint, content);
-                return await ExportToImageAnalysisResponse(response);
+                var responseObject = JsonSerializer.Deserialize<ImageAnalysisResponse>(responseData);
+                return responseObject.Labels.Select(x => x.Name).ToList();
             }
-            catch (Exception ex)
+            else
             {
-                return new List<string> { $"Unhandled Error: {ex.Message}" };
+                throw new Exception($"Error: {responseData}");
             }
         }
 
@@ -644,79 +492,138 @@ namespace OpenAiTools
         public async Task<string> CheckApiHealth()
         {
             var client = SetClient();
-            try
-            {
-                var response = await client.GetAsync(_chatEndpoint + "/health");
-                response.EnsureSuccessStatusCode();
-                return await response.Content.ReadAsStringAsync();
-            }
-            catch (Exception ex)
-            {
-                return $"Unhandled Error: {ex.Message}";
-            }
+            var response = await client.GetAsync($"{_chatEndpoint}/health");
+            return await response.Content.ReadAsStringAsync();
         }
 
         // Text to Speech
         public async Task<byte[]> TextToSpeech(string text)
         {
-            var client = SetClient();
-            var requestContent = GenerateTextToSpeechRequestContent(text);
+            var client = SetClient("Bearer", "application/json");
 
-            try
+            // Create the request content
+            var requestPayload = new
             {
-                var response = await client.PostAsync(_ttsEndpoint, requestContent);
-                response.EnsureSuccessStatusCode();
-                return await response.Content.ReadAsByteArrayAsync();
-            }
-            catch (Exception ex)
-            {
-                throw new Exception($"Unhandled Error: {ex.Message}");
-            }
-        }
-
-        public async Task StreamAudioToFile(string text, string filePath)
-        {
-            var client = SetClient();
-            var requestContent = GenerateTextToSpeechRequestContent(text);
-
-            try
-            {
-                var response = await client.PostAsync(_ttsEndpoint, requestContent);
-                response.EnsureSuccessStatusCode();
-
-                using (var responseStream = await response.Content.ReadAsStreamAsync())
-                using (var fileStream = new FileStream(filePath, FileMode.Create, FileAccess.Write, FileShare.None, 4096, true))
-                {
-                    await responseStream.CopyToAsync(fileStream);
-                }
-            }
-            catch (Exception ex)
-            {
-                throw new Exception($"Unhandled Error: {ex.Message}");
-            }
-        }
-
-        private StringContent GenerateTextToSpeechRequestContent(string text)
-        {
-            var requestContent = new Dictionary<string, object>
-            {
-                { "model", "tts-1" },
-                { "input", text },
-                { "voice", _voice }
+                model = "tts-1",  // Ensure the model parameter is included
+                input = text,
+                voice = _voice
             };
 
-            var json = JsonSerializer.Serialize(requestContent, new JsonSerializerOptions { DefaultIgnoreCondition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull });
-            return new StringContent(json, Encoding.UTF8, "application/json");
+            var requestContent = new StringContent(JsonSerializer.Serialize(requestPayload), Encoding.UTF8, "application/json");
+
+            try
+            {
+                // Log the request content for debugging
+                Console.WriteLine($"Request: {JsonSerializer.Serialize(requestPayload)}");
+
+                // Send the POST request
+                var response = await client.PostAsync(_ttsEndpoint, requestContent);
+
+                // Log the response status
+                Console.WriteLine($"Response Status: {response.StatusCode}");
+
+                // Ensure we got a successful response
+                response.EnsureSuccessStatusCode();
+
+                // Read and return the response content as byte array
+                var responseBytes = await response.Content.ReadAsByteArrayAsync();
+
+                // Log the response length
+                Console.WriteLine($"Response Length: {responseBytes.Length}");
+
+                return responseBytes;
+            }
+            catch (HttpRequestException e)
+            {
+                // Log and rethrow the exception to handle it in the calling method
+                Console.WriteLine($"Request error: {e.Message}");
+                throw;
+            }
+            catch (Exception e)
+            {
+                // Log and rethrow any other exceptions
+                Console.WriteLine($"Unexpected error: {e.Message}");
+                throw;
+            }
         }
+
+
+
+        public async Task StreamAudioToFile(string text, string filePath, string voice)
+        {
+            var audioData = await TextToSpeech(text);
+            await File.WriteAllBytesAsync(filePath, audioData);
+        }
+        public static string SanitizeBlobFileName(string fileName)
+        {
+            // Replace invalid characters with hyphens
+            string sanitizedFileName = Regex.Replace(fileName, @"[^a-zA-Z0-9\-]", "-");
+
+            // Ensure the file name is within the length limits
+            if (sanitizedFileName.Length > 1024)
+            {
+                sanitizedFileName = sanitizedFileName.Substring(0, 1024);
+            }
+
+            return sanitizedFileName;
+        }
+        public async Task<string> StreamAudioToBlob(string text, string containerName, string fileName, string voice)
+        {
+            // Create the request content
+            var requestPayload = new
+            {
+                model = "tts-1",
+                input = text,
+                voice = voice
+            };
+
+            var requestContent = new StringContent(JsonSerializer.Serialize(requestPayload), Encoding.UTF8, "application/json");
+
+            // Set up the HTTP client
+            var client = SetClient("Bearer", "application/json");
+
+            // Send the POST request
+            var response = await client.PostAsync(_ttsEndpoint, requestContent);
+
+            // Ensure the response is successful
+            response.EnsureSuccessStatusCode();
+
+            // Get the response content as a stream
+            var audioStream = await response.Content.ReadAsStreamAsync();
+
+            // Sanitize the file name
+            var sanitizedFileName = SanitizeBlobFileName(fileName);
+
+            // Get a reference to the blob container
+            var containerClient = _blobServiceClient.GetBlobContainerClient(containerName);
+            await containerClient.CreateIfNotExistsAsync(PublicAccessType.Blob);
+
+            // Get a reference to the blob
+            var blobClient = containerClient.GetBlobClient(sanitizedFileName);
+
+            // Upload the audio stream to the blob
+            await blobClient.UploadAsync(audioStream, new BlobHttpHeaders { ContentType = "audio/mpeg" });
+
+            // Return the URL of the uploaded blob
+            return blobClient.Uri.ToString();
+        }
+
     }
 
-    public class Response
+    public class OpenAiSettings
     {
-        public bool IsSuccess { get; set; }
-        public string ErrorMessage { get; set; }
+        public string ApiKey { get; set; }
+        public string ChatModel { get; set; }
+        public string ImageModel { get; set; }
+        public string ChatEndpoint { get; set; }
+        public string ImageEndpoint { get; set; }
+        public string TtsEndpoint { get; set; }
+        public int DefaultMaxTokens { get; set; }
+        public int DefaultImageWidth { get; set; }
+        public int DefaultImageHeight { get; set; }
     }
 
-    public class ChatResponse : Response
+    public class ChatResponse
     {
         [JsonPropertyName("id")]
         public string Id { get; set; }
@@ -738,6 +645,9 @@ namespace OpenAiTools
 
         [JsonPropertyName("system_fingerprint")]
         public string SystemFingerprint { get; set; }
+
+        public bool IsSuccess { get; set; }
+        public string ErrorMessage { get; set; }
     }
 
     public class Choice
@@ -776,10 +686,13 @@ namespace OpenAiTools
         public int TotalTokens { get; set; }
     }
 
-    public class ImageResponse : Response
+    public class ImageResponse
     {
         [JsonPropertyName("data")]
         public List<ImageData> Data { get; set; }
+
+        public bool IsSuccess { get; set; }
+        public string ErrorMessage { get; set; }
     }
 
     public class ImageData
@@ -791,39 +704,16 @@ namespace OpenAiTools
         public string RevisedPrompt { get; set; }
     }
 
-    public class AnalyzeImageResponse
+    public class ImageAnalysisResponse
     {
-        [JsonPropertyName("analyze_results")]
-        public List<string> AnalyzeResults { get; set; }
+        [JsonPropertyName("labels")]
+        public List<Label> Labels { get; set; }
     }
 
-    public class OpenAiSettings
+    public class Label
     {
-        [JsonPropertyName("api_key")]
-        public string ApiKey { get; set; }
-
-        [JsonPropertyName("chat_model")]
-        public string ChatModel { get; set; }
-
-        [JsonPropertyName("image_model")]
-        public string ImageModel { get; set; }
-
-        [JsonPropertyName("chat_endpoint")]
-        public string ChatEndpoint { get; set; }
-
-        [JsonPropertyName("image_endpoint")]
-        public string ImageEndpoint { get; set; }
-
-        [JsonPropertyName("default_max_tokens")]
-        public int DefaultMaxTokens { get; set; }
-
-        [JsonPropertyName("default_image_width")]
-        public int DefaultImageWidth { get; set; }
-
-        [JsonPropertyName("default_image_height")]
-        public int DefaultImageHeight { get; set; }
-
-        [JsonPropertyName("tts_endpoint")]
-        public string TtsEndpoint { get; set; }
+        [JsonPropertyName("name")]
+        public string Name { get; set; }
     }
+
 }
