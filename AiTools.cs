@@ -140,7 +140,25 @@ namespace OpenAiTools
                 };
             }
         }
+        public async Task<ChatResponse> GetChatResponse(string prompt, bool Json = false)
+        {
+            var client = SetClient();
+            var request = GenerateChatRequestContent(prompt,JSON:Json);
 
+            try
+            {
+                var response = await client.PostAsync(_chatEndpoint, request);
+                return await ExportToChatResponse(response);
+            }
+            catch (Exception ex)
+            {
+                return new ChatResponse
+                {
+                    IsSuccess = false,
+                    ErrorMessage = $"Unhandled Error: {ex.Message}"
+                };
+            }
+        }
         private async Task<ChatResponse> ExportToChatResponse(HttpResponseMessage response)
         {
             var responseData = await response.Content.ReadAsStringAsync();
@@ -224,23 +242,38 @@ namespace OpenAiTools
         // Get Chat Response Object
         public async Task<T> GetChatResponseObject<T>(string prompt)
         {
-            var requestContent = GenerateChatRequestContent(prompt, JSON: true);
+            var exampleObject = Activator.CreateInstance<T>();
+            var exampleJson = JsonSerializer.Serialize(exampleObject);
+            var requestPrompt = $"{prompt} Return response in this Json format. This will not be read by a human.{exampleJson}";
+            ChatResponse temp = await GetChatResponse(requestPrompt,true);
 
-            var client = SetClient();
-            var response = await client.PostAsync(_chatEndpoint, requestContent);
-
-            var responseData = await response.Content.ReadAsStringAsync();
-
-            if (response.IsSuccessStatusCode)
+            if (temp.IsSuccess && temp.Choices.Count > 0)
             {
-                var responseObject = JsonSerializer.Deserialize<T>(responseData);
+                string jsonContent = ExtractJsonFromResponse(temp.Choices[0].Message.Content);
+                var responseObject = JsonSerializer.Deserialize<T>(jsonContent);
                 return responseObject;
             }
             else
             {
-                throw new Exception($"Error: {responseData}");
+                throw new Exception($"Error: {temp.ErrorMessage}");
             }
         }
+
+        private string ExtractJsonFromResponse(string response)
+        {
+            // Use regex to extract JSON content from the response
+            var jsonRegex = new Regex(@"{.*}");
+            var match = jsonRegex.Match(response);
+            if (match.Success)
+            {
+                return match.Value;
+            }
+            else
+            {
+                return response;
+            }
+        }
+
 
         public async Task<List<string>> GetMultipleChatResponses(string prompt, int count)
         {
